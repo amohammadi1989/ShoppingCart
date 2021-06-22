@@ -1,0 +1,4 @@
+FROM maven-dev.behsazan.net:80/behsazan-docker-repo/openjdk:latest
+EXPOSE 8082
+ADD target/shoppingcart-0.0.1-SNAPSHOT.jar  shoppingcart-0.0.1-SNAPSHOT.jar
+ENTRYPOINT ["java","-jar","shoppingcart-0.0.1-SNAPSHOT.jar"]
