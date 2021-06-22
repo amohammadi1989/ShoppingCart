@@ -80,8 +80,7 @@ public class ShoppingCartController implements Serializable {
                         .findUserByUserName( SecurityContext.getUserName() );
         }
 
-        //@PreAuthorize("hasRole('"+ UserConstants.USER_WRITE_PRIVILEGE+"')")
-        //TODO :enable authrization
+        @PreAuthorize("hasRole('"+ UserConstants.USER_WRITE_PRIVILEGE+"')")
         @DeleteMapping(ShoppingCartConstants.CART_PRODUCT_DEL)
         @PreAuthorize("hasRole('"+ UserConstants.USER_WRITE_PRIVILEGE+"')")
         public ResponseEntity removeProductFromCart(
