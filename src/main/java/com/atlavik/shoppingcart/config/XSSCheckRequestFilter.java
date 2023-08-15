@@ -1,5 +1,8 @@
 package com.behsazan.baseclasses.command;
+//https://stackoverflow.com/questions/1548782/retrieving-json-object-literal-from-httpservletrequest
+//https://gist.github.com/IhorShylo/51abc0777d7bc73bf0b926b475fc4ee9
 
+https://github.com/eugenp/tutorials/tree/master/spring-web-modules/spring-mvc-basics-3/src/main/java/com/baeldung/cachedrequest
 import com.behsazan.samyar.util.Constants;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.text.StringEscapeUtils;
