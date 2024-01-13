@@ -1,0 +1,220 @@
+  <dependencies>
+    <dependency>
+      <groupId>org.thepavel</groupId>
+      <artifactId>spring-icomponent</artifactId>
+      <version>1.0.8</version>
+    </dependency>
+//*********************************
+package com.bws.infra.handler.event;
+
+import com.bws.infra.annotation.event.BwsEventProxy;
+import com.bws.infra.dto.common.EventMessage;
+import com.bws.infra.utils.JsonUtil;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.LocalDateTime;
+import java.util.concurrent.TimeUnit;
+import lombok.RequiredArgsConstructor;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.header.internals.RecordHeader;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.annotation.Order;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.requestreply.ReplyingKafkaTemplate;
+import org.springframework.kafka.requestreply.RequestReplyFuture;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.kafka.support.SendResult;
+import org.springframework.stereotype.Service;
+import org.thepavel.icomponent.handler.MethodHandler;
+import org.thepavel.icomponent.metadata.MethodMetadata;
+
+@Service
+@RequiredArgsConstructor
+@Order(30)
+public class BwsEventHandler implements MethodHandler {
+
+  private final KafkaTemplate<String,String> kafkaTemplate;
+  @Autowired
+  private ReplyingKafkaTemplate<String, String, String> replyingKafkaTemplate;
+  //private final SimpleDiscoveryProperties simpleDiscoveryProperties;
+  @Value("${spring.application.name}")
+  private String requestReplyTopic;
+
+  @Override
+  public Object handle(Object[] objects, MethodMetadata methodMetadata) {
+    try {
+      BwsEventProxy bwsEventProxy = methodMetadata.getSourceClassMetadata().getSourceClass()
+          .getAnnotation(BwsEventProxy.class);
+
+      String topicName = bwsEventProxy.value();
+
+      EventMessage eMsg=new EventMessage();
+      eMsg.setClassName(methodMetadata.getSourceClassMetadata().getSourceClass().getName());
+      eMsg.setMethodName(methodMetadata.getSourceMethod().getName());
+      eMsg.setDateTime(LocalDateTime.now());
+      String[] params=new String[objects.length];
+      ObjectMapper objectMapper=new ObjectMapper();
+      String[] paramTypes=new String[objects.length];
+      var i=0;
+      for(Object o:objects){
+        params[i]=objectMapper.writeValueAsString(o);
+        paramTypes[i++]=o.getClass().getName();
+      }
+      eMsg.setParam(params);
+      eMsg.setParameterTypes(paramTypes);
+      eMsg.setReturnType(methodMetadata.getSourceMethod().getReturnType().getName());
+      String body = JsonUtil.toJson(eMsg);
+      if(!methodMetadata.getSourceMethod().getReturnType().getName().contains("void")) {
+        ProducerRecord<String, String> record = new ProducerRecord<>(topicName, body);
+        record.headers()
+            .add(new RecordHeader(KafkaHeaders.REPLY_TOPIC, requestReplyTopic.getBytes()));
+        RequestReplyFuture<String, String, String> sendAndReceive = replyingKafkaTemplate
+            .sendAndReceive(record);
+        SendResult<String, String> sendResult = sendAndReceive.getSendFuture()
+            .get(60, TimeUnit.SECONDS);
+      /*  sendResult.getProducerRecord().headers()
+            .forEach(header -> System.out.println(header.key() + ":" + header.value().toString()));*/
+        ConsumerRecord<String, String> consumerRecord = sendAndReceive.get(60, TimeUnit.SECONDS);
+
+        Class<?> returnTypes =
+            Class.forName(methodMetadata.getSourceMethod().getReturnType().getName());
+        return objectMapper.readValue(consumerRecord.value(), returnTypes);
+      }else {
+        kafkaTemplate.send("faf-"+topicName,body);
+      }
+    } catch (Throwable ex) {
+      ex.printStackTrace();
+    }
+    return null;
+  }
+}
+//****************************************************************************
+
+
+@Target({ElementType.TYPE})
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+@Component
+@Handler("bwsEventHandler")
+public @interface BwsEventProxy {
+  @AliasFor(
+  annotation = Component.class
+  )
+  String value() default "";
+}
+//************************************************************************
+
+
+package com.bws.infra.events;
+
+import com.bws.infra.dto.common.EventMessage;
+import com.bws.infra.spring.SpringUtil;
+import com.bws.infra.utils.JsonUtil;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+import lombok.SneakyThrows;
+import org.reflections.Reflections;
+import org.springframework.kafka.annotation.EnableKafka;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.messaging.handler.annotation.Header;
+import org.springframework.messaging.handler.annotation.SendTo;
+import org.springframework.stereotype.Component;
+
+@Component
+@EnableKafka
+public class EventService {
+
+  private static Map<String, Object> cacheMap = new HashMap<>();
+
+  @KafkaListener(topics = "${spring.application.name}", groupId = "consume-${spring.application.name}")
+  @SendTo
+  public String handle(String obj,@Header(KafkaHeaders.RECEIVED_TIMESTAMP) long ts) {
+    EventMessage eventMessage = JsonUtil.toObject(obj, EventMessage.class);
+    return JsonUtil.toJson(executeMethodOfObject(eventMessage));
+  }
+
+  @KafkaListener(topics = "faf-${spring.application.name}", groupId = "consume-faf-${spring.application.name}")
+  public void handleFaf(String obj) {
+    EventMessage eventMessage = JsonUtil.toObject(obj, EventMessage.class);
+    executeMethodOfObject(eventMessage);
+  }
+
+
+  private Object executeMethodOfObject(EventMessage eventMessage) {
+    try {
+      //todo: tuning performance
+      Reflections reflections = new Reflections("com.bws");
+      var list = reflections.getSubTypesOf(Class.forName(eventMessage.getClassName())).stream()
+          .collect(
+              Collectors.toList());
+      Optional<Object> obj = list
+          .stream()
+          .map(c -> {
+            Method[] m = c.getMethods();
+            Optional<Method> l = Arrays.stream(m).filter(mm -> validMethod(eventMessage, mm))
+                .findFirst();
+            if (l.isPresent()) {
+              Object refObject = SpringUtil.getBean(c);
+              try {
+                cacheMap.put(eventMessage.getClassName(), refObject);
+                if (l.get().getReturnType().getName().contains("void")) {
+                  l.get().invoke(refObject, eventMessage.getParam());
+                  return Optional.empty();
+                } else {
+                  return l.get().invoke(refObject, eventMessage.getParam());
+                }
+              } catch (IllegalAccessException e) {
+                e.printStackTrace();
+              } catch (InvocationTargetException e) {
+                e.printStackTrace();
+              }
+            }
+            return Optional.empty();
+          }).findFirst();
+
+      return obj.get();
+    } catch (Exception e) {
+      e.printStackTrace();
+    }
+    return null;
+  }
+
+  @SneakyThrows
+  private boolean validMethod(EventMessage eventMessage, Method mm) {
+    Object[] newParams = new Object[eventMessage.getParam().length];
+    ObjectMapper obj = new ObjectMapper();
+    if (mm.getName().equals(eventMessage.getMethodName())) {
+      var count = mm.getParameterCount();
+      if (eventMessage.getParameterTypes().length == count) {
+        Class<?>[] clz = mm.getParameterTypes();
+        for (var j = 0; j < clz.length; j++) {
+          if (!clz[j].getName().contains(eventMessage.getParameterTypes()[j])) {
+            return false;
+          } else {
+            newParams[j] = obj.readValue(eventMessage.getParam()[j].toString(), clz[j]);
+          }
+        }
+        if (!eventMessage.getReturnType().contains(mm.getReturnType().getName())) {
+          return false;
+        }
+        eventMessage.setParam(newParams);
+        return true;
+      }
+      ;
+    }
+    return false;
+  }
+
+}
+
+
+
+
